@@ -1,7 +1,9 @@
 name: 539雲端更新與自主檢修
 on:
   schedule:
-    - cron: '2-57/5 12-15 * * 1-6'
+    # The script exits immediately on ordinary Sundays. Daily scheduling also
+    # covers only the explicitly confirmed exceptional Sunday draw dates.
+    - cron: '2-57/5 12-15 * * *'
   workflow_dispatch:
 permissions:
   contents: write
@@ -15,12 +17,15 @@ jobs:
     steps:
       - name: 讀取全新檢查器
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: 驗證逾時、期別與排程防護
+        run: node --test tests/update.test.mjs
       - name: 真實更新、修復與公開讀回
+        if: github.ref == 'refs/heads/main'
         env:
           TW539_EVENT: ${{ github.event_name }}
         run: node scripts/update.mjs
       - name: 保存真實健康心跳
-        if: always()
+        if: always() && github.ref == 'refs/heads/main'
         shell: bash
         run: |
           if [ -f status/last-check.json ]; then
