@@ -1,0 +1,32 @@
+name: 539雲端更新與自主檢修
+on:
+  schedule:
+    - cron: '2-57/5 12-15 * * 1-6'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: tw539-cloud-update
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: 讀取全新檢查器
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: 真實更新、修復與公開讀回
+        env:
+          TW539_EVENT: ${{ github.event_name }}
+        run: node scripts/update.mjs
+      - name: 保存真實健康心跳
+        if: always()
+        shell: bash
+        run: |
+          if [ -f status/last-check.json ]; then
+            git add -- status/last-check.json
+            if ! git diff --cached --quiet; then
+              git -c user.name='539 cloud watchdog' -c user.email='cloud-watchdog@users.noreply.github.com' commit -m '保存539雲端健康心跳'
+              git push origin HEAD:main
+            fi
+          fi
