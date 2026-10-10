@@ -131,3 +131,10 @@ test('daily cron delegates Sunday gating to the script and reserves runner time'
   assert.match(workflow,/node --test tests\/update.test.mjs/);
   assert.equal(TOTAL_BUDGET_MS,360000);assert.ok(TOTAL_BUDGET_MS<8*60*1000);
 });
+
+test('non-main dispatch cannot update production or push branch code into main',async()=>{
+  const workflow=await readFile(new URL('../.github/workflows/update.yml',import.meta.url),'utf8');
+  assert.match(workflow,/- name: 真實更新、修復與公開讀回\n        if: github.ref == 'refs\/heads\/main'\n/);
+  assert.match(workflow,/- name: 保存真實健康心跳\n        if: always\(\) && github.ref == 'refs\/heads\/main'\n/);
+  assert.match(workflow,/- name: 驗證逾時、期別與排程防護\n        run: node --test tests\/update.test.mjs/);
+});
