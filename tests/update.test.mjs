@@ -7,7 +7,12 @@ const instant=Date.parse('2026-10-10T21:40:00+08:00');
 const token='12345678-1234-1234-1234-123456789abc';
 const hash='a'.repeat(64);
 function state(at=instant,targetDate='2026-10-10'){
-  return {report:{cutoffPeriod:115000244,targetPeriod:115000245,targetDate,inputHash:hash,input:{lastDate:'2026-10-09'}},status:{state:{lastSuccess:{at:new Date(at).toISOString(),latestPeriod:115000244,targetPeriod:115000245,inputHash:hash}}}};
+  const ranking=Array.from({length:39},(_,i)=>({number:i+1,rank:i+1,probability:5/39}));
+  const report={cutoffPeriod:115000244,targetPeriod:115000245,targetDate,inputHash:hash,modelVersion:'fixture-original',storedAt:new Date(at-1000).toISOString(),archiveVerified:true,input:{lastDate:'2026-10-09',count:5990}};
+  const research={version:'fixture-research',status:'research_only',number:1,modelId:'discount60',modelEstimate:5/39,targetDate,targetPeriod:report.targetPeriod,cutoffPeriod:report.cutoffPeriod,trainingDraws:5990,ranking,top5:[1,2,3,4,5],top9:[1,2,3,4,5,6,7,8,9],checks:{prequential:true,ranking:true,marginalSum:true,explanation:true},modelSelection:{selectedModelId:'discount60',experts:[{id:'discount60',currentSingle:1,currentEstimate:5/39}]}};
+  const decision={id:'d'.repeat(64),version:'fixture-decision',status:'no_supported_single',selectedNumber:null,targetDate,targetPeriod:report.targetPeriod,cutoffPeriod:report.cutoffPeriod,inputHash:hash,research};
+  const sync={snapshotId:'e'.repeat(64),inputHash:hash,targetPeriod:report.targetPeriod,cutoffPeriod:report.cutoffPeriod,modelVersion:report.modelVersion,storedAt:report.storedAt,decisionId:decision.id,decisionVersion:decision.version,decisionStatus:decision.status,researchVersion:research.version,researchNumber:research.number};
+  return {report,decision:{ready:true,decision},sync,status:{state:{lastError:null,candidateError:null,decisionError:null,lastSuccess:{at:new Date(at).toISOString(),latestPeriod:report.cutoffPeriod,targetPeriod:report.targetPeriod,inputHash:hash}}}};
 }
 const response=(data,status=200,retryAfter)=>({ok:status>=200&&status<300,status,headers:{get:name=>name==='retry-after'?retryAfter:null},json:async()=>data});
 function harness({at=instant,event='workflow_dispatch',refresh={ok:true},getState,customFetch,budgetMs}={}){
@@ -53,6 +58,84 @@ test('21:40 pending official publication is healthy; stale after22:00 is rejecte
 test('successful run validates and records current data',async()=>{
   const h=harness();const result=await runWatchdog(h.options);
   assert.equal(result.ok,true);assert.equal(h.saved.length,1);assert.equal(result.inputHash,hash);assert.equal(h.calls.length,3);
+});
+
+test('verified research remains healthy without a high-confidence selectedNumber',()=>{
+  const valid=state();
+  assert.equal(valid.decision.decision.selectedNumber,null);
+  assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
+});
+
+test('module failures cannot be hidden by an otherwise fresh lastSuccess',()=>{
+  for(const key of ['lastError','candidateError','decisionError']){
+    const bad=state();bad.status.state[key]={at:new Date(instant).toISOString(),message:'failed'};
+    assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/未處理故障/);
+  }
+  for(const key of ['candidate','decision'])assert.throws(()=>verifyState(state(),{ok:true,[key]:{ok:false}},instant,instant),/未完成/);
+});
+
+test('missing or unverified forecast, decision and research reject healthy status',()=>{
+  const mutations=[
+    s=>{s.report.archiveVerified=false;},
+    s=>{s.decision.ready=false;},
+    s=>{delete s.decision.decision;},
+    s=>{delete s.sync;},
+    s=>{delete s.decision.decision.research;},
+    s=>{s.decision.decision.research.number=0;},
+    s=>{s.decision.decision.research.number=40;},
+    s=>{s.decision.decision.research.status='supported';}
+  ];
+  for(const mutate of mutations){const bad=state();mutate(bad);assert.throws(()=>verifyState(bad,{ok:true},instant,instant));}
+});
+
+test('decision and research must share all forecast dates, periods and input hashes',()=>{
+  for(const key of ['targetPeriod','cutoffPeriod','targetDate','inputHash']){
+    const bad=state();bad.decision.decision[key]=key.endsWith('Period')?1:'wrong';
+    assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/獨支決策.*不一致/);
+  }
+  for(const key of ['targetPeriod','cutoffPeriod','targetDate','inputHash','trainingDraws']){
+    const bad=state();bad.decision.decision.research[key]=key.endsWith('Period')||key==='trainingDraws'?1:'wrong';
+    assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/研究獨支.*不一致/);
+  }
+});
+
+test('every snapshot and decision synchronization identity must match',()=>{
+  for(const key of ['inputHash','targetPeriod','cutoffPeriod','modelVersion','storedAt','decisionId','decisionVersion','decisionStatus','researchVersion','researchNumber']){
+    const bad=state();bad.sync[key]='wrong';
+    assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/跨裝置同步.*不一致/);
+  }
+  const bad=state();bad.sync.snapshotId='';
+  assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/快照識別/);
+  assert.throws(()=>verifyState(state(),{ok:true,decision:{ok:true,id:'f'.repeat(64)}},instant,instant),/更新回應獨支決策識別/);
+});
+
+test('research requires all four named true checks and a conserving complete ranking',()=>{
+  const mutations=[
+    q=>{delete q.checks;},
+    q=>{q.checks.explanation=false;},
+    q=>{delete q.checks.explanation;},
+    q=>{q.checks={a:true,b:true,c:true,d:true};},
+    q=>{q.ranking.pop();},
+    q=>{q.ranking[1].number=1;},
+    q=>{q.ranking[1].rank=1;},
+    q=>{q.ranking[1].probability=NaN;},
+    q=>{q.ranking[1].probability=0;},
+    q=>{q.number=2;},
+    q=>{q.modelEstimate=0;},
+    q=>{q.top5.reverse();},
+    q=>{q.top9.reverse();},
+    q=>{q.modelSelection.selectedModelId='conditional';},
+    q=>{q.modelSelection.experts[0].currentSingle=2;}
+  ];
+  for(const mutate of mutations){const bad=state();mutate(bad.decision.decision.research);assert.throws(()=>verifyState(bad,{ok:true},instant,instant));}
+});
+
+test('missing research is retried and recorded as failed instead of a false success',async()=>{
+  const h=harness({getState:at=>{const s=state(at);delete s.decision.decision.research;return s;}});
+  const result=await runWatchdog(h.options);
+  assert.equal(result.ok,false);assert.match(result.error,/研究獨支缺漏/);
+  assert.equal(h.calls.filter(path=>path.startsWith('/api/refresh')).length,3);
+  assert.equal(h.saved.length,1);assert.equal(h.saved[0].ok,false);
 });
 
 test('mismatched, invalid and stale success cannot produce healthy status',()=>{
@@ -133,7 +216,7 @@ test('daily cron delegates Sunday gating to the script and reserves runner time'
 });
 
 test('non-main dispatch cannot update production or push branch code into main',async()=>{
-  const workflow=await readFile(new URL('../.github/workflows/update.yml',import.meta.url),'utf8');
+  const workflow=(await readFile(new URL('../.github/workflows/update.yml',import.meta.url),'utf8')).replace(/\r\n/g,'\n');
   assert.match(workflow,/- name: 真實更新、修復與公開讀回\n        if: github.ref == 'refs\/heads\/main'\n/);
   assert.match(workflow,/- name: 保存真實健康心跳\n        if: always\(\) && github.ref == 'refs\/heads\/main'\n/);
   assert.match(workflow,/- name: 驗證逾時、期別與排程防護\n        run: node --test tests\/update.test.mjs/);
