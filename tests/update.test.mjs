@@ -14,6 +14,21 @@ function state(at=instant,targetDate='2026-10-10'){
   const sync={snapshotId:'e'.repeat(64),inputHash:hash,targetPeriod:report.targetPeriod,cutoffPeriod:report.cutoffPeriod,modelVersion:report.modelVersion,storedAt:report.storedAt,decisionId:decision.id,decisionVersion:decision.version,decisionStatus:decision.status,researchVersion:research.version,researchNumber:research.number};
   return {report,decision:{ready:true,decision},sync,status:{state:{lastError:null,candidateError:null,decisionError:null,lastSuccess:{at:new Date(at).toISOString(),latestPeriod:report.cutoffPeriod,targetPeriod:report.targetPeriod,inputHash:hash}}}};
 }
+function stateV3(at=instant,targetDate='2026-10-10'){
+  const result=state(at,targetDate),decision=result.decision.decision,research=decision.research;
+  decision.version='539-single-verified-diagnostics-v3-20261011';
+  decision.researchDiagnostics={version:'539-research-diagnostics-v1-20261011',number:research.number,targetDate,targetPeriod:result.report.targetPeriod,cutoffPeriod:result.report.cutoffPeriod,trainingDraws:research.trainingDraws,checks:{trace:true,replay:true,selection:true,weighting:true}};
+  decision.adoptionReview={policy:{version:'539-verified-adoption-v1-20261011'},records:[]};
+  decision.candidates=Array.from({length:39},(_,i)=>({number:i+1,eligible:false,genericSupportPassed:false,isRepeat:false,repeatStatus:'not_applicable',supportingModels:[]}));
+  result.sync.decisionVersion=decision.version;
+  return result;
+}
+function supportedV3(){
+  const result=stateV3(),decision=result.decision.decision,selected=decision.candidates.find(row=>row.number===17);
+  decision.status='supported';decision.selectedNumber=17;selected.eligible=true;selected.genericSupportPassed=true;selected.supportingModels=[{id:'approved-model',currentSingle:17,validated:true,approvedForSelection:true}];
+  result.sync.decisionStatus=decision.status;
+  return result;
+}
 const response=(data,status=200,retryAfter)=>({ok:status>=200&&status<300,status,headers:{get:name=>name==='retry-after'?retryAfter:null},json:async()=>data});
 function harness({at=instant,event='workflow_dispatch',refresh={ok:true},getState,customFetch,budgetMs}={}){
   let current=at;const calls=[],saved=[],sleeps=[];
@@ -64,6 +79,87 @@ test('verified research remains healthy without a high-confidence selectedNumber
   const valid=state();
   assert.equal(valid.decision.decision.selectedNumber,null);
   assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
+});
+
+test('version2 research fixtures remain compatible without version3 diagnostic fields',()=>{
+  const valid=state();valid.decision.decision.version='539-single-guarded-with-research-v2-20261011';valid.sync.decisionVersion=valid.decision.decision.version;
+  assert.equal(valid.decision.decision.researchDiagnostics,undefined);
+  assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
+});
+
+test('version3 valid diagnostics and an empty supported set are healthy, not a module fault',async()=>{
+  const valid=stateV3();assert.equal(valid.decision.decision.selectedNumber,null);
+  assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
+  const h=harness({getState:at=>stateV3(at)}),result=await runWatchdog(h.options);
+  assert.equal(result.ok,true);assert.equal(h.calls.length,3);assert.equal(h.saved[0].ok,true);
+});
+
+test('version3 missing or mismatching number diagnostics cannot produce healthy status',()=>{
+  const mutations=[
+    s=>{delete s.decision.decision.researchDiagnostics;},
+    s=>{s.decision.decision.researchDiagnostics.number=17;},
+    s=>{s.decision.decision.researchDiagnostics.targetDate='2026-10-12';},
+    s=>{s.decision.decision.researchDiagnostics.targetPeriod++;},
+    s=>{s.decision.decision.researchDiagnostics.cutoffPeriod--;},
+    s=>{s.decision.decision.researchDiagnostics.trainingDraws--;}
+  ];
+  for(const mutate of mutations){const bad=stateV3();mutate(bad);assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/研究本號診斷/);}
+});
+
+test('version3 diagnostics require the four named true verification checks',()=>{
+  for(const key of ['trace','replay','selection','weighting']){
+    const bad=stateV3();bad.decision.decision.researchDiagnostics.checks[key]=false;
+    assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/診斷四項驗證/);
+  }
+  for(const checks of [undefined,{trace:true,replay:true,selection:true},{a:true,b:true,c:true,d:true},{trace:true,replay:true,selection:true,weighting:true,unchecked:true}]){
+    const bad=stateV3();bad.decision.decision.researchDiagnostics.checks=checks;
+    assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/診斷四項驗證/);
+  }
+});
+
+test('version3 model adoption policy and record array cannot be omitted or substituted',()=>{
+  const mutations=[
+    s=>{delete s.decision.decision.adoptionReview;},
+    s=>{delete s.decision.decision.adoptionReview.policy;},
+    s=>{s.decision.decision.adoptionReview.policy.version='unverified-policy';},
+    s=>{delete s.decision.decision.adoptionReview.records;},
+    s=>{s.decision.decision.adoptionReview.records={};}
+  ];
+  for(const mutate of mutations){const bad=stateV3();mutate(bad);assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/模型採用審查/);}
+});
+
+test('version3 supported primary uses the actually eligible number, not its research number',()=>{
+  const valid=supportedV3();assert.notEqual(valid.decision.decision.selectedNumber,valid.decision.decision.research.number);
+  assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
+});
+
+test('supported labels cannot bypass candidate eligibility, validation or explicit approval',()=>{
+  const mutations=[
+    s=>{s.decision.decision.selectedNumber=40;},
+    s=>{delete s.decision.decision.candidates;},
+    s=>{s.decision.decision.candidates.find(row=>row.number===17).eligible=false;},
+    s=>{s.decision.decision.candidates.find(row=>row.number===17).genericSupportPassed=false;},
+    s=>{s.decision.decision.candidates.find(row=>row.number===17).supportingModels=[];},
+    s=>{s.decision.decision.candidates.find(row=>row.number===17).supportingModels[0].validated=false;},
+    s=>{s.decision.decision.candidates.find(row=>row.number===17).supportingModels[0].approvedForSelection=false;},
+    s=>{s.decision.decision.candidates.find(row=>row.number===17).supportingModels[0].currentSingle=1;}
+  ];
+  for(const mutate of mutations){const bad=supportedV3();mutate(bad);assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/主推薦/);}
+});
+
+test('a repeat primary must pass its own repeat gate; unsupported states must retain a null primary',()=>{
+  const valid=supportedV3(),selected=valid.decision.decision.candidates.find(row=>row.number===17);selected.isRepeat=true;selected.repeatStatus='supported';
+  assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
+  selected.repeatStatus='insufficient';assert.throws(()=>verifyState(valid,{ok:true},instant,instant),/連莊主推薦/);
+  for(const status of ['no_supported_single','stale']){
+    const bad=stateV3();bad.decision.decision.status=status;bad.sync.decisionStatus=status;bad.decision.decision.selectedNumber=17;
+    assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/未通過主推薦檢核/);
+  }
+});
+
+test('version3 missing diagnostics is retried and reported failed rather than falsely healthy',async()=>{
+  const h=harness({getState:at=>{const bad=stateV3(at);delete bad.decision.decision.researchDiagnostics;return bad;}}),result=await runWatchdog(h.options);
+  assert.equal(result.ok,false);assert.match(result.error,/研究本號診斷缺漏/);assert.equal(h.calls.filter(path=>path.startsWith('/api/refresh')).length,3);assert.equal(h.saved[0].ok,false);
 });
 
 test('module failures cannot be hidden by an otherwise fresh lastSuccess',()=>{

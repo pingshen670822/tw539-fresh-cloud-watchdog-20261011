@@ -115,6 +115,28 @@ export function verifyState(state,result,started,checkedAt){
   assert.ok(JSON.stringify(research.top5)===JSON.stringify(ranking.slice(0,5).map(x=>x.number))&&JSON.stringify(research.top9)===JSON.stringify(ranking.slice(0,9).map(x=>x.number)),'研究獨支前五前九與排名不一致');
   assert.equal(research.modelSelection?.selectedModelId,research.modelId,'研究獨支專家選擇識別不一致');
   assert.ok(research.modelSelection?.experts?.some(x=>x.id===research.modelId&&x.currentSingle===research.number&&x.currentEstimate===research.modelEstimate),'研究獨支與已選專家首選不一致');
+  assert.ok(['supported','no_supported_single','stale'].includes(decision.status),'獨支決策狀態無效');
+  if(decision.status==='supported'){
+    assert.ok(Number.isInteger(decision.selectedNumber)&&decision.selectedNumber>=1&&decision.selectedNumber<=39,'主推薦號碼無效');
+    const selected=Array.isArray(decision.candidates)?decision.candidates.find(row=>row.number===decision.selectedNumber):null;
+    assert.ok(selected&&selected.eligible===true&&selected.genericSupportPassed===true,'主推薦未通過本號資格與模型支持檢核');
+    assert.ok(typeof selected.isRepeat==='boolean'&&(!selected.isRepeat||selected.repeatStatus==='supported'),'連莊主推薦未通過獨立連莊檢核');
+    assert.ok(Array.isArray(selected.supportingModels)&&selected.supportingModels.some(model=>model.currentSingle===decision.selectedNumber&&model.validated===true&&model.approvedForSelection===true),'主推薦缺少本號已驗證且已批准的模型');
+  }else{
+    assert.equal(decision.selectedNumber,null,'未通過主推薦檢核不得填入主推薦號碼');
+  }
+  if(decision.version==='539-single-verified-diagnostics-v3-20261011'){
+    const diagnostics=decision.researchDiagnostics;
+    assert.ok(diagnostics,'第三版研究本號診斷缺漏，不能標示更新成功');
+    assert.equal(diagnostics.number,research.number,'研究本號診斷號碼不一致');
+    for(const key of ['targetDate','targetPeriod','cutoffPeriod'])assert.equal(diagnostics[key],report[key],`研究本號診斷${key}不一致`);
+    assert.equal(diagnostics.trainingDraws,research.trainingDraws,'研究本號診斷完整歷史筆數不一致');
+    assert.equal(diagnostics.trainingDraws,report.input?.count,'研究本號診斷與原封存歷史筆數不一致');
+    const diagnosticsChecks=diagnostics.checks;
+    assert.ok(diagnosticsChecks&&Object.keys(diagnosticsChecks).length===4&&['trace','replay','selection','weighting'].every(key=>diagnosticsChecks[key]===true),'研究本號診斷四項驗證未全部通過');
+    assert.equal(decision.adoptionReview?.policy?.version,'539-verified-adoption-v1-20261011','模型採用審查政策缺漏或版本不符');
+    assert.ok(Array.isArray(decision.adoptionReview.records),'模型採用審查紀錄格式無效');
+  }
   const publicationDeadline=Date.parse(report.targetDate+'T22:00:00+08:00');
   assert.ok(Number.isFinite(publicationDeadline),'目標日期無效');
   if(checkedAt>publicationDeadline)throw new Error('台北22:00完整結果預計公布後仍未取得新期，立即啟動檢修');
