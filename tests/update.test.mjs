@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {requestJson,runWatchdog,scheduledWindow,verifyState,saveHeartbeatBounded,TOTAL_BUDGET_MS} from '../scripts/update.mjs';
 import {attachPublication,seal} from './publication-fixture.mjs';
-import {digest} from '../scripts/publication-contract.mjs';
+import {digest,verifyHistoricalReviews} from '../scripts/publication-contract.mjs';
+import {REPORT_VERIFICATION_VERSION} from '../scripts/report-verification-policy.mjs';
+import {FIFTY_VERSION} from '../scripts/fifty-policy.mjs';
 
 const instant=Date.parse('2026-10-10T21:40:00+08:00');
 const token='12345678-1234-1234-1234-123456789abc';
@@ -32,14 +34,17 @@ function supportedV3(){
   return attachPublication(result);
 }
 const response=(data,status=200,retryAfter)=>({ok:status>=200&&status<300,status,headers:{get:name=>name==='retry-after'?retryAfter:null},json:async()=>data});
-function harness({at=instant,event='workflow_dispatch',refresh={ok:true},getState,customFetch,budgetMs}={}){
-  let current=at;const calls=[],saved=[],sleeps=[];
+function historicalEnvelope(report){return {inputHash:report.inputHash,latestPeriod:report.cutoffPeriod,targetPeriod:report.targetPeriod,sourceLastDate:report.input.lastDate,fiftyReviews:[],sixReviews:[],fiftyReviewError:null,sixReviewError:null}}
+function harness({at=instant,event='workflow_dispatch',refresh={ok:true},getState,getReviews,customFetch,budgetMs}={}){
+  let current=at,lastState;const calls=[],saved=[],sleeps=[];
   const options={event,now:()=>current,saveHeartbeat:async value=>saved.push(value),log:()=>{},logError:()=>{},sleep:async ms=>{sleeps.push(ms);current+=ms;},fetchImpl:async(url,options)=>{
     const path=new URL(url).pathname+new URL(url).search;calls.push(path);
     if(customFetch){const custom=await customFetch(path,options,calls.length);if(custom)return custom;}
     if(path==='/api/action')return response({token});
     if(path.startsWith('/api/refresh'))return response(refresh);
-    return response(getState?getState(current):state(current));
+    if(path==='/api/state'){lastState=getState?getState(current):state(current);return response(lastState)}
+    if(path==='/api/reviews')return response(getReviews?getReviews(current,lastState):historicalEnvelope(lastState.report));
+    return response({message:'unmocked route'},404);
   }};
   if(budgetMs!==undefined)options.budgetMs=budgetMs;
   return {options,calls,saved,sleeps};
@@ -58,13 +63,13 @@ test('schedule bounds use Taipei time and include only confirmed exceptional Sun
 test('Sunday schedule actually checks official state and the next real draw instead of a successful no-op',async()=>{
   const at=Date.parse('2026-10-11T21:40:00+08:00'),h=harness({at,event:'schedule',getState:()=>state(at,'2026-10-12')});
   const result=await runWatchdog(h.options);
-  assert.equal(result.ok,true);assert.equal(result.skipped,undefined);assert.equal(result.targetDate,'2026-10-12');assert.equal(h.calls.length,3);assert.equal(h.saved.length,1);
+  assert.equal(result.ok,true);assert.equal(result.skipped,undefined);assert.equal(result.targetDate,'2026-10-12');assert.equal(h.calls.length,4);assert.equal(h.saved.length,1);
 });
 
 test('a night schedule delayed until next-day00:31 still updates and reads persisted current state',async()=>{
   const at=Date.parse('2026-10-17T00:31:00+08:00'),h=harness({at,event:'schedule',getState:()=>state(at,'2026-10-17')});
   const result=await runWatchdog(h.options);
-  assert.equal(result.ok,true);assert.equal(result.skipped,undefined);assert.equal(result.day,'2026-10-17');assert.equal(h.calls.length,3);assert.equal(h.saved[0].verificationId.length,64);assert.equal(h.saved[0].sixCombinationId.length,64);
+  assert.equal(result.ok,true);assert.equal(result.skipped,undefined);assert.equal(result.day,'2026-10-17');assert.equal(h.calls.length,4);assert.equal(h.saved[0].verificationId.length,64);assert.equal(h.saved[0].sixCombinationId.length,64);
 });
 
 test('a delayed Sunday run with stale target reports failed health after actual requests',async()=>{
@@ -75,7 +80,7 @@ test('a delayed Sunday run with stale target reports failed health after actual 
 test('manual Sunday invocation remains available',async()=>{
   const at=Date.parse('2026-10-11T21:40:00+08:00');
   const h=harness({at,getState:()=>state(at,'2026-10-12')});
-  assert.equal((await runWatchdog(h.options)).ok,true);assert.equal(h.calls.length,3);
+  assert.equal((await runWatchdog(h.options)).ok,true);assert.equal(h.calls.length,4);
 });
 
 test('21:40 pending official publication is healthy; stale after22:00 is rejected',()=>{
@@ -86,7 +91,7 @@ test('21:40 pending official publication is healthy; stale after22:00 is rejecte
 
 test('successful run validates and records current data',async()=>{
   const h=harness();const result=await runWatchdog(h.options);
-  assert.equal(result.ok,true);assert.equal(h.saved.length,1);assert.equal(result.inputHash,hash);assert.equal(h.calls.length,3);
+  assert.equal(result.ok,true);assert.equal(h.saved.length,1);assert.equal(result.inputHash,hash);assert.equal(h.calls.length,4);assert.equal(result.historicalReviewsVerified,true);assert.equal(result.fiftyReviewCount,0);assert.equal(result.sixReviewCount,0);
 });
 
 test('verified research remains healthy without a high-confidence selectedNumber',()=>{
@@ -106,7 +111,7 @@ test('version3 valid diagnostics and an empty supported set are healthy, not a m
   const valid=stateV3();assert.equal(valid.decision.decision.selectedNumber,null);
   assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
   const h=harness({getState:at=>stateV3(at)}),result=await runWatchdog(h.options);
-  assert.equal(result.ok,true);assert.equal(h.calls.length,3);assert.equal(h.saved[0].ok,true);
+  assert.equal(result.ok,true);assert.equal(h.calls.length,4);assert.equal(h.saved[0].ok,true);
 });
 
 test('version3 missing or mismatching number diagnostics cannot produce healthy status',()=>{
@@ -388,6 +393,61 @@ test('phase-one pending checkpoint is retried with a new capability and only pha
  assert.throws(()=>verifyState(stateV3(),{ok:true,pending:true},instant,instant),/分階段運算/);
  const inProgress=stateV3();inProgress.status.state.updateProgress={stage:'report_verification'};assert.throws(()=>verifyState(inProgress,{ok:true},instant,instant),/分階段運算/);
  const pending=harness({refresh:{ok:false,pending:true,sourceOk:true,message:'pending'}});assert.equal((await runWatchdog(pending.options)).ok,false);assert.equal(pending.saved[0].ok,false);assert.equal(pending.calls.includes('/api/state'),false);
+});
+
+// Isolated completed-history output structure, not a historical model replay or
+// a claim that these chosen numbers were ever published before an actual draw.
+function completedHistory(s=stateV3()){
+ const r=s.report,value=historicalEnvelope(r),drawn=[1,6,10,20,30],date=r.input.lastDate,previous=new Date(date+'T00:00:00Z');previous.setUTCDate(previous.getUTCDate()-1);
+ const base={sourceVerificationId:'b'.repeat(64),sourceFiftyVersion:FIFTY_VERSION,inputHash:'c'.repeat(64),period:r.cutoffPeriod,date,cutoffPeriod:r.cutoffPeriod-1,cutoffDate:previous.toISOString().slice(0,10),storedAt:date+'T10:00:00.000Z',status:'completed',drawn};
+ value.fiftyReviews=[{...base,kind:'fifty_fusion_live',sourceVerificationVersion:REPORT_VERIFICATION_VERSION,number:1,singleHit:true,groups:s.verification.report.fifty.fusion.groups.map(({id,size,label,minHits,maxHits,numbers})=>{const hits=numbers.filter(n=>drawn.includes(n));return {id,size,label,minHits,maxHits,numbers:[...numbers],hits,hitCount:hits.length,targetMet:hits.length>=minHits&&hits.length<=maxHits}})}];
+ value.sixReviews=[{...base,kind:'six_combinations_live',id:'d'.repeat(64),combinationSnapshotId:'d'.repeat(64),storedAt:date+'T10:00:01.000Z',groups:s.sixCombinations.snapshot.groups.map(({id,rank,numbers,expectedHits})=>{const hits=numbers.filter(n=>drawn.includes(n));return {id,rank,numbers:[...numbers],expectedHits,hits,hitCount:hits.length}})}];
+ return value;
+}
+
+test('deferred current-state history becomes healthy only after the bound historical endpoint completes',async()=>{
+ const h=harness({getState:at=>({...stateV3(at),historicalReviewsDeferred:true}),getReviews:(_at,s)=>completedHistory(s)}),result=await runWatchdog(h.options);
+ assert.equal(result.ok,true);assert.equal(result.historicalReviewsVerified,true);assert.equal(result.fiftyReviewCount,1);assert.equal(result.sixReviewCount,1);assert.equal(result.historyReceiptId.length,64);assert.equal(h.calls.filter(path=>path==='/api/reviews').length,1);assert.equal(h.saved[0].historyReceiptId,result.historyReceiptId);
+ assert.deepEqual(h.calls,['/api/action','/api/refresh','/api/state','/api/reviews']);
+});
+
+test('historical readback cannot be missing, still deferred, malformed or bound to a stale official prefix',()=>{
+ const s=stateV3();
+ for(const mutate of [v=>delete v.inputHash,v=>v.inputHash='f'.repeat(64),v=>v.latestPeriod--,v=>v.targetPeriod++,v=>v.sourceLastDate='2026-10-08',v=>v.fiftyReviewError='replay failed',v=>delete v.fiftyReviewError,v=>v.sixReviewError='source failed',v=>delete v.sixReviewError,v=>delete v.fiftyReviews,v=>v.fiftyReviews={},v=>delete v.sixReviews,v=>v.sixReviews=null,v=>v.historicalReviewsDeferred=true,v=>v.deferred=true,v=>v.pending=true,v=>v.ready=false]){
+  const value=completedHistory(s);mutate(value);assert.throws(()=>verifyHistoricalReviews(value,s.report,instant));
+ }
+ for(const value of [undefined,null,{},s])assert.throws(()=>verifyHistoricalReviews(value,s.report,instant));
+});
+
+test('completed historical rows reject invalid, pending, future, late or mismatched result records',()=>{
+ const s=stateV3();
+ for(const mutate of [v=>v.fiftyReviews[0].status='invalid',v=>v.fiftyReviews[0].status='pending',v=>v.sixReviews[0].status='invalid',v=>v.sixReviews[0].status='pending',v=>v.fiftyReviews[0].period=s.report.targetPeriod,v=>v.fiftyReviews[0].cutoffPeriod=s.report.cutoffPeriod,v=>v.fiftyReviews[0].date=s.report.targetDate,v=>v.fiftyReviews[0].storedAt=v.fiftyReviews[0].date+'T12:30:00.000Z',v=>v.sixReviews[0].storedAt=new Date(Date.parse(v.fiftyReviews[0].storedAt)-1).toISOString(),v=>v.fiftyReviews[0].sourceVerificationVersion='old',v=>v.sixReviews[0].sourceVerificationId='f'.repeat(64),v=>v.sixReviews[0].inputHash='f'.repeat(64),v=>v.sixReviews[0].drawn=[1,2,3,4,5],v=>v.sixReviews[0].id='f'.repeat(64),v=>v.fiftyReviews.push(structuredClone(v.fiftyReviews[0])),v=>v.sixReviews.push(structuredClone(v.sixReviews[0]))]){
+  const value=completedHistory(s);mutate(value);assert.throws(()=>verifyHistoricalReviews(value,s.report,instant));
+ }
+ const value=completedHistory(s);assert.throws(()=>verifyHistoricalReviews(value,s.report,Date.parse(value.fiftyReviews[0].storedAt)),/尚未開獎/);
+});
+
+test('historical actual-hit math is independently checked instead of accepting completed flags',()=>{
+ const s=stateV3();
+ for(const mutate of [v=>v.fiftyReviews[0].singleHit=false,v=>v.fiftyReviews[0].drawn[1]=1,v=>v.fiftyReviews[0].groups[2].hitCount++,v=>v.fiftyReviews[0].groups[0].targetMet=true,v=>v.fiftyReviews[0].groups[4].numbers.reverse(),v=>v.sixReviews[0].groups.pop(),v=>v.sixReviews[0].groups[0].hits=[],v=>v.sixReviews[0].groups[1].hitCount++,v=>v.sixReviews[0].groups[1].numbers=[...v.sixReviews[0].groups[0].numbers],v=>v.sixReviews[0].groups[1].expectedHits=5.1]){
+  const value=completedHistory(s);mutate(value);assert.throws(()=>verifyHistoricalReviews(value,s.report,instant));
+ }
+});
+
+test('failed, deferred or missing historical endpoint never produces a successful watchdog heartbeat',async()=>{
+ for(const fetchHistory of [()=>response({message:'historical endpoint unavailable'},404),()=>response({message:'historical replay failed'},503),()=>response({deferred:true},202),()=>response(null)]){
+  const h=harness({customFetch:path=>path==='/api/reviews'?fetchHistory():undefined}),result=await runWatchdog(h.options);
+  assert.equal(result.ok,false);assert.equal(h.saved.length,1);assert.equal(h.saved[0].ok,false);assert.equal(h.calls.filter(path=>path==='/api/reviews').length,3);
+ }
+ for(const mutate of [v=>v.latestPeriod--,v=>v.inputHash='f'.repeat(64),v=>v.fiftyReviews[0].status='invalid',v=>v.sixReviews[0].status='pending']){
+  const h=harness({getReviews:(_at,s)=>{const value=completedHistory(s);mutate(value);return value}}),result=await runWatchdog(h.options);
+  assert.equal(result.ok,false);assert.equal(h.saved[0].ok,false);
+ }
+});
+
+test('a hung historical endpoint respects the shared request budget and saves failed health',async()=>{
+ const started=Date.now(),h=harness({budgetMs:25,customFetch:path=>path==='/api/reviews'?new Promise(()=>{}):undefined}),result=await runWatchdog(h.options);
+ assert.equal(result.ok,false);assert.match(result.error,/逾時/);assert.equal(h.saved[0].ok,false);assert.equal(h.calls.filter(path=>path==='/api/reviews').length,3);assert.ok(Date.now()-started<2000);
 });
 
 test('the structural watchdog has no model-replay or Site-checkout dependency',async()=>{

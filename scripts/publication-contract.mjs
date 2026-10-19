@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {validateReportVerification,REPORT_VERIFICATION_VERSION,REPORT_VERIFICATION_POLICY} from './report-verification-policy.mjs';
+import {FIFTY_VERSION,FIFTY_GROUPS} from './fifty-policy.mjs';
 
 export const GROUP_VERSION='539-research-ranking-groups-v1-20261012';
 export const GROUP_RANGES=[{size:2,minHits:1,maxHits:2},{size:3,minHits:1,maxHits:3},{size:5,minHits:2,maxHits:5},{size:7,minHits:2,maxHits:5},{size:9,minHits:3,maxHits:5}];
@@ -104,4 +105,66 @@ export function verifyPublication(state,result,checkedAt){
  if(result.sixCombinations?.id)assert.equal(result.sixCombinations.id,six.id,'更新回應六碼組合識別不一致');
  assert.equal(sync.snapshotId,digest([report.modelVersion,report.targetPeriod,report.inputHash,report.storedAt,decision.id,groups.id,proof.id,six.id]),'完整跨裝置快照內容識別不一致');
  return {groups,proof,six};
+}
+
+const numbers=(value,count)=>Array.isArray(value)&&value.length===count&&new Set(value).size===count&&value.every(n=>Number.isInteger(n)&&n>=1&&n<=39);
+const validDate=value=>typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;
+
+/** The Site owns historical model replays. This separate readback proves that
+ * deferred historical work actually completed for the same official prefix;
+ * it checks its result math and immutable source links without running models. */
+export function verifyHistoricalReviews(value,report,checkedAt){
+ assert.ok(value&&typeof value==='object','歷史實戰檢討回應缺漏');
+ assert.ok(value.historicalReviewsDeferred!==true&&value.deferred!==true&&value.pending!==true&&value.ready!==false,'歷史實戰檢討仍延後或未完成');
+ for(const [key,expected] of Object.entries({inputHash:report.inputHash,latestPeriod:report.cutoffPeriod,targetPeriod:report.targetPeriod,sourceLastDate:report.input?.lastDate}))assert.equal(value[key],expected,'歷史實戰檢討來源不一致：'+key);
+ assert.equal(value.fiftyReviewError,null,'五十融合歷史實戰檢討仍有錯誤或未完成');
+ assert.equal(value.sixReviewError,null,'六碼歷史實戰檢討仍有錯誤或未完成');
+ assert.ok(Array.isArray(value.fiftyReviews)&&Array.isArray(value.sixReviews),'歷史實戰檢討名單缺漏');
+ const fiftyBySource=new Map(),periods=new Set(),sixPeriods=new Set();
+ const base=(row,kind)=>{
+  assert.equal(row?.kind,kind,'歷史實戰檢討類別無效');
+  assert.equal(row.status,'completed','歷史實戰檢討包含未完成或無效紀錄');
+  assert.ok(Number.isSafeInteger(row.period)&&Number.isSafeInteger(row.cutoffPeriod)&&row.cutoffPeriod<row.period&&row.period<=report.cutoffPeriod&&row.cutoffPeriod<report.cutoffPeriod,'歷史實戰檢討期別含當期或未來資料');
+  assert.ok(validDate(row.date)&&validDate(row.cutoffDate)&&row.cutoffDate<row.date&&row.date<=report.input.lastDate,'歷史實戰檢討日期或截止無效');
+  assert.ok(Math.floor(row.period/1000000)===Number(row.date.slice(0,4))-1911&&Math.floor(row.cutoffPeriod/1000000)===Number(row.cutoffDate.slice(0,4))-1911,'歷史實戰檢討年份與期別不符');
+  if(row.period===report.cutoffPeriod)assert.equal(row.date,report.input.lastDate,'最新已開獎期的歷史檢討日期不一致');
+  for(const key of ['sourceVerificationId','inputHash'])assert.match(row[key]??'',/^[a-f0-9]{64}$/,'歷史實戰檢討來源識別無效：'+key);
+  assert.equal(row.sourceFiftyVersion,FIFTY_VERSION,'歷史五十模組來源版本不一致');
+  const deadline=Date.parse(row.date+'T20:30:00+08:00');
+  assert.ok(validTime(row.storedAt)&&Date.parse(row.storedAt)<deadline&&checkedAt>=deadline,'歷史實戰檢討來源不是開獎前封存或尚未開獎');
+  assert.ok(numbers(row.drawn,5),'歷史實戰檢討官方五碼無效');
+  assert.deepEqual(row.drawn,[...row.drawn].sort((a,b)=>a-b),'歷史實戰檢討官方五碼順序無效');
+ };
+ for(const row of value.fiftyReviews){
+  base(row,'fifty_fusion_live');
+  assert.equal(row.sourceVerificationVersion,REPORT_VERIFICATION_VERSION,'歷史二十項驗證來源版本不一致');
+  assert.ok(!periods.has(row.period)&&!fiftyBySource.has(row.sourceVerificationId),'五十融合歷史實戰檢討期別或來源重複');periods.add(row.period);fiftyBySource.set(row.sourceVerificationId,row);
+  assert.ok(Number.isInteger(row.number)&&row.number>=1&&row.number<=39,'歷史實戰獨支無效');
+  assert.equal(row.singleHit,row.drawn.includes(row.number),'歷史實戰獨支命中計數不一致');
+  assert.ok(Array.isArray(row.groups)&&row.groups.length===5,'五十融合歷史五組名單不完整');
+  const top9=row.groups[4]?.numbers;assert.ok(numbers(top9,9)&&top9[0]===row.number,'歷史實戰獨支與九碼名單不一致');
+  row.groups.forEach((group,i)=>{
+   const spec=FIFTY_GROUPS[i];
+   for(const key of ['size','minHits','maxHits','label'])assert.equal(group[key],spec[key],'歷史五組目標不一致：'+key);
+   assert.equal(group.id,'fifty_group_'+spec.size,'歷史五組識別無效');
+   assert.deepEqual(group.numbers,top9.slice(0,spec.size),'歷史五組名單不是同一封存排名前綴');
+   const hits=group.numbers.filter(n=>row.drawn.includes(n));assert.deepEqual(group.hits,hits,'歷史五組命中號碼不一致');assert.equal(group.hitCount,hits.length,'歷史五組命中數不一致');assert.equal(group.targetMet,hits.length>=spec.minHits&&hits.length<=spec.maxHits,'歷史五組達標判定不一致');
+  });
+ }
+ for(const row of value.sixReviews){
+  base(row,'six_combinations_live');
+  assert.ok(!sixPeriods.has(row.period),'六碼歷史實戰檢討期別重複');sixPeriods.add(row.period);
+  assert.match(row.combinationSnapshotId??'',/^[a-f0-9]{64}$/,'歷史六碼封存識別無效');assert.equal(row.id,row.combinationSnapshotId,'歷史六碼封存識別不一致');
+  const source=fiftyBySource.get(row.sourceVerificationId);assert.ok(source,'歷史六碼缺少已完成核對的五十融合來源');
+  for(const key of ['period','date','cutoffPeriod','cutoffDate','inputHash'])assert.equal(row[key],source[key],'歷史六碼與五十融合來源不一致：'+key);
+  assert.ok(Date.parse(row.storedAt)>=Date.parse(source.storedAt),'歷史六碼封存時間早於五十來源');assert.deepEqual(row.drawn,source.drawn,'歷史六碼與五十融合官方結果不一致');
+  assert.ok(Array.isArray(row.groups)&&row.groups.length===10,'歷史六碼十組名單不完整');const combinations=new Set();
+  row.groups.forEach((group,i)=>{
+   assert.equal(group.id,'six_group_'+String(i+1).padStart(2,'0'),'歷史六碼組別識別無效');assert.equal(group.rank,i+1,'歷史六碼組別排名無效');assert.ok(numbers(group.numbers,6),'歷史六碼組別名單無效');
+   const key=[...group.numbers].sort((a,b)=>a-b).join(',');assert.ok(!combinations.has(key),'歷史六碼組別重複');combinations.add(key);
+   assert.ok(Number.isFinite(group.expectedHits)&&group.expectedHits>=0&&group.expectedHits<=5&&(!i||group.expectedHits<=row.groups[i-1].expectedHits),'歷史六碼預期顆數或排序無效');
+   const hits=group.numbers.filter(n=>row.drawn.includes(n));assert.deepEqual(group.hits,hits,'歷史六碼命中號碼不一致');assert.equal(group.hitCount,hits.length,'歷史六碼命中數不一致');
+  });
+ }
+ return {historyReceiptId:digest(value),historicalReviewsVerified:true,fiftyReviewCount:value.fiftyReviews.length,sixReviewCount:value.sixReviews.length};
 }

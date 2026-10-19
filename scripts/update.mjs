@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
-import {verifyPublication} from './publication-contract.mjs';
+import {verifyPublication,verifyHistoricalReviews} from './publication-contract.mjs';
 
 export const BASE='https://tw539-fresh-cloud-20261011.ping-shen670888.chatgpt.site';
 export const EXTRA_DRAW_DATES=['2025-01-26','2025-02-02','2025-02-09','2026-02-15','2026-02-22','2026-03-01'];
@@ -154,7 +154,7 @@ export async function heartbeat(value,{signal}={}){
   signal?.throwIfAborted();
   let previous;try{previous=JSON.parse(await readFile(path,{encoding:'utf8',signal}));}catch{}
   signal?.throwIfAborted();
-  const key=JSON.stringify([value.day,value.checkHour,value.ok,value.latestPeriod,value.targetPeriod,value.inputHash,value.decisionId,value.groupSnapshotId,value.verificationId,value.sixCombinationId,value.error]);
+  const key=JSON.stringify([value.day,value.checkHour,value.ok,value.latestPeriod,value.targetPeriod,value.inputHash,value.decisionId,value.groupSnapshotId,value.verificationId,value.sixCombinationId,value.historyReceiptId,value.error]);
   if(previous?.key===key)return;
   await writeFile(path,JSON.stringify({...value,key,checkedAt:new Date().toISOString()},null,2)+'\n',{signal});
 }
@@ -195,8 +195,11 @@ export async function runWatchdog({event=process.env.TW539_EVENT,now=Date.now,fe
       if(result.busy&&Date.parse(state?.status?.state?.lastSuccess?.at)<attemptStarted)throw new Error('雲端工作仍在執行，尚未取得新的成功紀錄');
       remaining(deadline,now);
       const {report,success,groups,proof,six}=verifyState(state,result,started,now());
+      // Current publication and historical semantic replay use separate Worker
+      // requests. A successful current state cannot hide deferred review work.
+      const historical=verifyHistoricalReviews(await json('/api/reviews'),report,now());
       const {day,minutes}=taipeiTime(now());
-      const value={day,checkHour:Math.floor(minutes/60),ok:true,latestPeriod:report.cutoffPeriod,latestDate:report.input?.lastDate,targetPeriod:report.targetPeriod,targetDate:report.targetDate,inputHash:report.inputHash,decisionId:state.decision.decision.id,groupSnapshotId:groups.id,verificationId:proof.id,sixCombinationId:six.id};
+      const value={day,checkHour:Math.floor(minutes/60),ok:true,latestPeriod:report.cutoffPeriod,latestDate:report.input?.lastDate,targetPeriod:report.targetPeriod,targetDate:report.targetDate,inputHash:report.inputHash,decisionId:state.decision.decision.id,groupSnapshotId:groups.id,verificationId:proof.id,sixCombinationId:six.id,...historical};
       await saveHeartbeatBounded(value,saveHeartbeat,Math.min(heartbeatTimeoutMs,remaining(deadline,now)));
       log(JSON.stringify({...value,sourceCheckedAt:success.at,message:result.message}));return value;
     }catch(e){
