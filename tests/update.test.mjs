@@ -34,15 +34,16 @@ function supportedV3(){
   return attachPublication(result);
 }
 const response=(data,status=200,retryAfter)=>({ok:status>=200&&status<300,status,headers:{get:name=>name==='retry-after'?retryAfter:null},json:async()=>data});
+const refreshReceipt=(s,extra={})=>({ok:true,publication:{ok:true,id:s.publication.id,version:s.publication.version},...extra});
 function historicalEnvelope(report){return {inputHash:report.inputHash,latestPeriod:report.cutoffPeriod,targetPeriod:report.targetPeriod,sourceLastDate:report.input.lastDate,fiftyReviews:[],sixReviews:[],fiftyReviewError:null,sixReviewError:null}}
-function harness({at=instant,event='workflow_dispatch',refresh={ok:true},getState,getReviews,customFetch,budgetMs}={}){
-  let current=at,lastState;const calls=[],saved=[],sleeps=[];
+function harness({at=instant,event='workflow_dispatch',refresh,getState,getReviews,customFetch,budgetMs}={}){
+  let current=at,lastState,preview;const calls=[],saved=[],sleeps=[];
   const options={event,now:()=>current,saveHeartbeat:async value=>saved.push(value),log:()=>{},logError:()=>{},sleep:async ms=>{sleeps.push(ms);current+=ms;},fetchImpl:async(url,options)=>{
     const path=new URL(url).pathname+new URL(url).search;calls.push(path);
     if(customFetch){const custom=await customFetch(path,options,calls.length);if(custom)return custom;}
     if(path==='/api/action')return response({token});
-    if(path.startsWith('/api/refresh'))return response(refresh);
-    if(path==='/api/state'){lastState=getState?getState(current):state(current);return response(lastState)}
+    if(path.startsWith('/api/refresh')){if(refresh!==undefined)return response(refresh);preview=getState?getState(current):state(current);return response(refreshReceipt(preview))}
+    if(path==='/api/state'){lastState=preview??(getState?getState(current):state(current));preview=undefined;return response(lastState)}
     if(path==='/api/reviews')return response(getReviews?getReviews(current,lastState):historicalEnvelope(lastState.report));
     return response({message:'unmocked route'},404);
   }};
@@ -84,9 +85,9 @@ test('manual Sunday invocation remains available',async()=>{
 });
 
 test('21:40 pending official publication is healthy; stale after22:00 is rejected',()=>{
-  assert.doesNotThrow(()=>verifyState(state(),{ok:true},instant,instant));
+  const valid=state();assert.doesNotThrow(()=>verifyState(valid,refreshReceipt(valid),instant,instant));
   const late=Date.parse('2026-10-10T22:00:01+08:00');
-  assert.throws(()=>verifyState(state(late),{ok:true},late,late),/22:00/);
+  const stale=state(late);assert.throws(()=>verifyState(stale,refreshReceipt(stale),late,late),/22:00/);
 });
 
 test('successful run validates and records current data',async()=>{
@@ -97,19 +98,19 @@ test('successful run validates and records current data',async()=>{
 test('verified research remains healthy without a high-confidence selectedNumber',()=>{
   const valid=state();
   assert.equal(valid.decision.decision.selectedNumber,null);
-  assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
+  assert.doesNotThrow(()=>verifyState(valid,refreshReceipt(valid),instant,instant));
 });
 
 test('version2 research fixtures remain compatible without version3 diagnostic fields',()=>{
   const valid=state();valid.decision.decision.version='539-single-guarded-with-research-v2-20261011';valid.sync.decisionVersion=valid.decision.decision.version;
   attachPublication(valid);
   assert.equal(valid.decision.decision.researchDiagnostics,undefined);
-  assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
+  assert.doesNotThrow(()=>verifyState(valid,refreshReceipt(valid),instant,instant));
 });
 
 test('version3 valid diagnostics and an empty supported set are healthy, not a module fault',async()=>{
   const valid=stateV3();assert.equal(valid.decision.decision.selectedNumber,null);
-  assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
+  assert.doesNotThrow(()=>verifyState(valid,refreshReceipt(valid),instant,instant));
   const h=harness({getState:at=>stateV3(at)}),result=await runWatchdog(h.options);
   assert.equal(result.ok,true);assert.equal(h.calls.length,4);assert.equal(h.saved[0].ok,true);
 });
@@ -150,7 +151,7 @@ test('version3 model adoption policy and record array cannot be omitted or subst
 
 test('version3 supported primary uses the actually eligible number, not its research number',()=>{
   const valid=supportedV3();assert.notEqual(valid.decision.decision.selectedNumber,valid.decision.decision.research.number);
-  assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
+  assert.doesNotThrow(()=>verifyState(valid,refreshReceipt(valid),instant,instant));
 });
 
 test('supported labels cannot bypass candidate eligibility, validation or explicit approval',()=>{
@@ -170,7 +171,7 @@ test('supported labels cannot bypass candidate eligibility, validation or explic
 test('a repeat primary must pass its own repeat gate; unsupported states must retain a null primary',()=>{
   const valid=supportedV3(),selected=valid.decision.decision.candidates.find(row=>row.number===17);selected.isRepeat=true;selected.repeatStatus='supported';
   attachPublication(valid);
-  assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
+  assert.doesNotThrow(()=>verifyState(valid,refreshReceipt(valid),instant,instant));
   selected.repeatStatus='insufficient';assert.throws(()=>verifyState(valid,{ok:true},instant,instant),/連莊主推薦/);
   for(const status of ['no_supported_single','stale']){
     const bad=stateV3();bad.decision.decision.status=status;bad.sync.decisionStatus=status;bad.decision.decision.selectedNumber=17;
@@ -184,7 +185,7 @@ test('version3 missing diagnostics is retried and reported failed rather than fa
 });
 
 test('module failures cannot be hidden by an otherwise fresh lastSuccess',()=>{
-  for(const key of ['lastError','candidateError','decisionError','groupError','verificationError','sixCombinationError']){
+  for(const key of ['lastError','candidateError','decisionError','groupError','verificationError','sixCombinationError','publicationError']){
     const bad=state();bad.status.state[key]={at:new Date(instant).toISOString(),message:'failed'};
     assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/未處理故障/);
   }
@@ -448,6 +449,49 @@ test('failed, deferred or missing historical endpoint never produces a successfu
 test('a hung historical endpoint respects the shared request budget and saves failed health',async()=>{
  const started=Date.now(),h=harness({budgetMs:25,customFetch:path=>path==='/api/reviews'?new Promise(()=>{}):undefined}),result=await runWatchdog(h.options);
  assert.equal(result.ok,false);assert.match(result.error,/逾時/);assert.equal(h.saved[0].ok,false);assert.equal(h.calls.filter(path=>path==='/api/reviews').length,3);assert.ok(Date.now()-started<2000);
+});
+
+test('server-signed publication mode, all source bindings and synchronized receipt are mandatory',()=>{
+ for(const mutate of [s=>delete s.publication,s=>s.publication.ready=false,s=>delete s.publication.mode,s=>s.publication.mode='unverified_cache',s=>s.publication.version='old',s=>s.publication.id='bad',s=>s.publication.inputHash='f'.repeat(64),s=>s.publication.targetPeriod++,s=>s.publication.cutoffPeriod--,s=>s.publication.verificationId='f'.repeat(64),s=>s.publication.sixCombinationId='f'.repeat(64),s=>delete s.sync.publicationId,s=>s.sync.publicationId='f'.repeat(64),s=>delete s.sync.publicationVersion,s=>s.sync.publicationVersion='old',s=>delete s.status.state.lastSuccess.publicationId,s=>s.status.state.lastSuccess.publicationId='f'.repeat(64)]){
+  const s=stateV3(),receipt=refreshReceipt(s);mutate(s);assert.throws(()=>verifyState(s,receipt,instant,instant),/發布認證/);
+ }
+ const s=stateV3();s.status.state.publicationError={message:'signature check failed'};assert.throws(()=>verifyState(s,refreshReceipt(s),instant,instant),/未處理故障/);
+});
+
+test('publication audit, authentication and readback timestamps are distinct from pre-draw seal times',()=>{
+ const s=stateV3(),drawAt=Date.parse(s.report.targetDate+'T20:30:00+08:00');
+ s.publication.fullAuditAt=new Date(drawAt+1000).toISOString();s.publication.createdAt=new Date(drawAt+2000).toISOString();
+ assert.doesNotThrow(()=>verifyState(s,refreshReceipt(s),instant,instant),'a real post-draw authentication of genuine pre-draw rows is allowed');
+ for(const mutate of [s=>delete s.publication.fullAuditAt,s=>s.publication.fullAuditAt='invalid',s=>s.publication.createdAt='invalid',s=>s.publication.verifiedAt='invalid',s=>s.publication.fullAuditAt=new Date(Date.parse(s.publication.createdAt)+1).toISOString(),s=>s.publication.createdAt=new Date(instant+31000).toISOString(),s=>s.publication.verifiedAt=new Date(instant+31000).toISOString(),s=>s.publication.verifiedAt=new Date(instant-120001).toISOString()]){
+  const invalid=stateV3();mutate(invalid);assert.throws(()=>verifyState(invalid,refreshReceipt(invalid),instant,instant),/發布認證.*時間/);
+ }
+});
+
+test('ordinary refreshes need a successful publication receipt; busy and skipped still need authenticated state',()=>{
+ const s=stateV3();assert.doesNotThrow(()=>verifyState(s,refreshReceipt(s),instant,instant));
+ for(const receipt of [{ok:true},{ok:true,skipped:'true'},{ok:true,busy:'true'},{ok:true,publication:{}},{ok:true,publication:{ok:false,id:s.publication.id,version:s.publication.version}},{ok:true,publication:{ok:true,id:'f'.repeat(64),version:s.publication.version}},{ok:true,publication:{ok:true,id:s.publication.id,version:'old'}},refreshReceipt(s,{publicationId:'f'.repeat(64)})])assert.throws(()=>verifyState(s,receipt,instant,instant),/發布認證/);
+ for(const mode of ['busy','skipped']){
+  assert.doesNotThrow(()=>verifyState(s,{ok:true,[mode]:true},instant,instant));
+  assert.throws(()=>verifyState(s,{ok:true,[mode]:true,publication:{ok:false}},instant,instant),/發布認證/);
+  const bad=stateV3();bad.publication.ready=false;assert.throws(()=>verifyState(bad,{ok:true,[mode]:true},instant,instant),/發布認證/);
+ }
+});
+
+test('publication failures or missing refresh authentication never yield a successful heartbeat',async()=>{
+ for(const h of [harness({refresh:{ok:true}}),harness({getState:at=>{const s=stateV3(at);s.publication.ready=false;return s}}),harness({refresh:{ok:true,skipped:true},getState:at=>{const s=stateV3(at);s.status.state.publicationError={message:'failed'};return s}})]){
+  const result=await runWatchdog(h.options);assert.equal(result.ok,false);assert.equal(h.saved[0].ok,false);assert.equal(h.calls.includes('/api/reviews'),false);
+ }
+ const h=harness(),result=await runWatchdog(h.options);assert.equal(result.ok,true);assert.equal(result.publicationId.length,64);assert.equal(result.publicationVersion,'539-signed-publication-v1-20261019');assert.equal(result.publicationMode,'signed_verified_archive');assert.equal(h.saved[0].publicationId,result.publicationId);
+ assert.ok(!Object.keys(result).some(key=>/secret|signature|signingKey/i.test(key)),'watchdog receives public receipts, never the server HMAC key');
+});
+
+test('readable signed publication cannot hide system-status, original-review or research-review errors',async()=>{
+ for(const key of ['systemStatusError','reviewsError','researchReviewError']){
+  const s=stateV3();s[key]='isolated API read failure';
+  assert.equal(s.publication.ready,true);assert.throws(()=>verifyState(s,refreshReceipt(s),instant,instant),/雲端狀態或實戰檢討.*未處理故障/);
+  const h=harness({refresh:{ok:true,skipped:true},getState:at=>{const partial=stateV3(at);partial[key]={message:'retained readable report, failed auxiliary read'};return partial}}),result=await runWatchdog(h.options);
+  assert.equal(result.ok,false);assert.equal(h.saved.length,1);assert.equal(h.saved[0].ok,false);assert.equal(h.calls.includes('/api/reviews'),false);
+ }
 });
 
 test('the structural watchdog has no model-replay or Site-checkout dependency',async()=>{

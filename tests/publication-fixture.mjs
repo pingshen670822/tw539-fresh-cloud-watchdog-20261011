@@ -2,7 +2,7 @@
 // or claims about prediction accuracy. Never publish these as lottery evidence.
 import * as policy from '../scripts/report-verification-policy.mjs';
 import * as fifty from '../scripts/fifty-policy.mjs';
-import {digest,GROUP_VERSION,GROUP_RANGES,SIX_VERSION,SIX_POLICY,HISTORY_MEANING,groupBaseline} from '../scripts/publication-contract.mjs';
+import {digest,GROUP_VERSION,GROUP_RANGES,SIX_VERSION,SIX_POLICY,HISTORY_MEANING,groupBaseline,PUBLICATION_VERSION} from '../scripts/publication-contract.mjs';
 const clone=value=>structuredClone(value);
 function unitNine(r){
  const total=r.input.count-200,stats=n=>({count:n,histogram:[n,0,0,0,0,0],bottomHistogram:[n,0,0,0,0,0],totalHits:0,atLeast2:0,atLeast3:0,meanHits:n?0:null,atLeast2Rate:n?0:null,atLeast3Rate:n?0:null,bottomMean:n?0:null}),ranking=clone(r.ranking),numbers=ranking.slice(0,9).map(x=>x.number);
@@ -47,5 +47,8 @@ export function attachPublication(value){
  const s=seal({version:SIX_VERSION,policy:clone(SIX_POLICY),status:'research_only',confidence:'research_reference',inputHash:r.inputHash,sourceVerificationId:p.id,sourceVerificationVersion:p.version,sourceVerificationStoredAt:p.storedAt,sourceFiftyVersion:p.fifty.version,targetDate:r.targetDate,targetPeriod:r.targetPeriod,cutoffPeriod:r.cutoffPeriod,cutoffDate:r.input.lastDate,trainingDraws:r.input.count,generatedAt:stamp(5000),storedAt:stamp(5000),pool,groups,evaluation:{kind:SIX_POLICY.history,walkForward:false,publishedPerformance:false,usesCurrentList:true,includesWarmup:true,count:r.input.count,firstDate:r.input.firstDate,lastDate:r.input.lastDate,meaning:HISTORY_MEANING}});
  value.sixCombinations={ready:true,snapshot:s};value.groupReviewError=null;value.fiftyReviewError=null;value.sixReviewError=null;
  Object.assign(value.sync,{storedAt:r.storedAt,decisionId:decision.id,decisionVersion:decision.version,decisionStatus:decision.status,groupSnapshotId:g.id,groupVersion:g.version,groupSourceDecisionId:decision.id,verificationId:p.id,verificationVersion:p.version,sixCombinationId:s.id,sixCombinationVersion:s.version,sixSourceVerificationId:p.id,snapshotId:digest([r.modelVersion,r.targetPeriod,r.inputHash,r.storedAt,decision.id,g.id,p.id,s.id])});
+ const publicationId=digest(['synthetic-publication-summary-only',r.inputHash,r.cutoffPeriod,r.targetPeriod,p.id,s.id]);
+ value.publication={ready:true,id:publicationId,version:PUBLICATION_VERSION,mode:'signed_verified_archive',inputHash:r.inputHash,targetPeriod:r.targetPeriod,cutoffPeriod:r.cutoffPeriod,verificationId:p.id,sixCombinationId:s.id,fullAuditAt:stamp(6000),createdAt:stamp(7000),verifiedAt:value.status.state.lastSuccess.at};
+ value.sync.publicationId=publicationId;value.sync.publicationVersion=PUBLICATION_VERSION;value.status.state.lastSuccess.publicationId=publicationId;value.status.state.publicationError=null;
  return value;
 }

@@ -4,6 +4,7 @@ import {validateReportVerification,REPORT_VERIFICATION_VERSION,REPORT_VERIFICATI
 import {FIFTY_VERSION,FIFTY_GROUPS} from './fifty-policy.mjs';
 
 export const GROUP_VERSION='539-research-ranking-groups-v1-20261012';
+export const PUBLICATION_VERSION='539-signed-publication-v1-20261019';
 export const GROUP_RANGES=[{size:2,minHits:1,maxHits:2},{size:3,minHits:1,maxHits:3},{size:5,minHits:2,maxHits:5},{size:7,minHits:2,maxHits:5},{size:9,minHits:3,maxHits:5}];
 export const GROUP_POLICY={version:GROUP_VERSION,basis:'verified_research_ranking_prefix',scope:'research_only',ranges:GROUP_RANGES,publication:'new_timestamped_pre_draw_seal_no_historical_backfill'};
 export const SIX_VERSION='539-six-top15-combinations-v1-20261015';
@@ -104,7 +105,26 @@ export function verifyPublication(state,result,checkedAt){
  for(const [key,value] of Object.entries({sixCombinationId:six.id,sixCombinationVersion:six.version,sixSourceVerificationId:proof.id}))assert.equal(sync[key],value,'六碼組合同步識別不一致：'+key);
  if(result.sixCombinations?.id)assert.equal(result.sixCombinations.id,six.id,'更新回應六碼組合識別不一致');
  assert.equal(sync.snapshotId,digest([report.modelVersion,report.targetPeriod,report.inputHash,report.storedAt,decision.id,groups.id,proof.id,six.id]),'完整跨裝置快照內容識別不一致');
- return {groups,proof,six};
+ const publication=state.publication;
+ assert.equal(publication?.ready,true,'伺服器發布認證尚未完成');
+ assert.equal(publication.mode,'signed_verified_archive','伺服器發布認證模式不符');
+ assert.equal(publication.version,PUBLICATION_VERSION,'伺服器發布認證版本不符');
+ assert.match(publication.id??'',/^[a-f0-9]{64}$/,'伺服器發布認證識別無效');
+ for(const [key,value] of Object.entries({inputHash:report.inputHash,targetPeriod:report.targetPeriod,cutoffPeriod:report.cutoffPeriod,verificationId:proof.id,sixCombinationId:six.id}))assert.equal(publication[key],value,'伺服器發布認證來源不一致：'+key);
+ assert.equal(sync.publicationId,publication.id,'伺服器發布認證同步識別不一致');
+ assert.equal(sync.publicationVersion,publication.version,'伺服器發布認證同步版本不一致');
+ assert.equal(state.status?.state?.lastSuccess?.publicationId,publication.id,'成功紀錄的發布認證識別不一致');
+ for(const key of ['fullAuditAt','createdAt','verifiedAt'])assert.ok(validTime(publication[key]),'伺服器發布認證時間無效：'+key);
+ assert.ok(Date.parse(publication.fullAuditAt)<=Date.parse(publication.createdAt)&&Date.parse(publication.createdAt)<=Date.parse(publication.verifiedAt)&&Date.parse(publication.verifiedAt)<=checkedAt+30000&&Date.parse(publication.verifiedAt)>=checkedAt-120000,'伺服器發布認證稽核、認證或讀回時間不一致');
+ // The HMAC key stays solely in the Site environment. The watchdog requires
+ // the server-authenticated receipt and source bindings, never a client key.
+ if(result.skipped!==true&&result.busy!==true||result.publication!==undefined){
+  assert.equal(result.publication?.ok,true,'本次更新發布認證未完成或缺少收據');
+  assert.equal(result.publication.id,publication.id,'更新回應發布認證識別不一致');
+  assert.equal(result.publication.version,publication.version,'更新回應發布認證版本不一致');
+ }
+ if(result.publicationId!==undefined)assert.equal(result.publicationId,publication.id,'更新回應頂層發布認證識別不一致');
+ return {groups,proof,six,publication};
 }
 
 const numbers=(value,count)=>Array.isArray(value)&&value.length===count&&new Set(value).size===count&&value.every(n=>Number.isInteger(n)&&n>=1&&n<=39);

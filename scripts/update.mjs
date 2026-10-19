@@ -73,9 +73,9 @@ export function verifyState(state,result,started,checkedAt){
   assert.equal(success.inputHash,report.inputHash,'資料指紋不一致');
   if(result.inputHash)assert.equal(result.inputHash,report.inputHash,'更新回應資料指紋不一致');
   const cloudState=state?.status?.state,decision=state?.decision?.decision,sync=state?.sync;
-  assert.ok(['lastError','candidateError','decisionError','groupError','verificationError','sixCombinationError'].every(key=>!cloudState?.[key]),'雲端模組仍有未處理故障，不能標示更新成功');
+  assert.ok(['lastError','candidateError','decisionError','groupError','verificationError','sixCombinationError','publicationError'].every(key=>!cloudState?.[key]),'雲端模組仍有未處理故障，不能標示更新成功');
   assert.ok(!cloudState?.updateProgress,'雲端分階段運算仍在進行，不能標示更新成功');
-  assert.ok(['groupReviewError','fiftyReviewError','sixReviewError'].every(key=>!state?.[key]),'雲端實戰檢討仍有未處理故障，不能標示更新成功');
+  assert.ok(['systemStatusError','reviewsError','researchReviewError','groupReviewError','fiftyReviewError','sixReviewError'].every(key=>!state?.[key]),'雲端狀態或實戰檢討仍有未處理故障，不能標示更新成功');
   assert.equal(report.archiveVerified,true,'原始封存尚未通過全歷史重算驗證');
   assert.equal(state?.decision?.ready,true,'本期獨支決策尚未完成讀回驗證');
   assert.ok(decision&&sync,'本期獨支決策或跨裝置同步資料缺漏');
@@ -154,7 +154,7 @@ export async function heartbeat(value,{signal}={}){
   signal?.throwIfAborted();
   let previous;try{previous=JSON.parse(await readFile(path,{encoding:'utf8',signal}));}catch{}
   signal?.throwIfAborted();
-  const key=JSON.stringify([value.day,value.checkHour,value.ok,value.latestPeriod,value.targetPeriod,value.inputHash,value.decisionId,value.groupSnapshotId,value.verificationId,value.sixCombinationId,value.historyReceiptId,value.error]);
+  const key=JSON.stringify([value.day,value.checkHour,value.ok,value.latestPeriod,value.targetPeriod,value.inputHash,value.decisionId,value.groupSnapshotId,value.verificationId,value.sixCombinationId,value.publicationId,value.historyReceiptId,value.error]);
   if(previous?.key===key)return;
   await writeFile(path,JSON.stringify({...value,key,checkedAt:new Date().toISOString()},null,2)+'\n',{signal});
 }
@@ -194,12 +194,12 @@ export async function runWatchdog({event=process.env.TW539_EVENT,now=Date.now,fe
       }
       if(result.busy&&Date.parse(state?.status?.state?.lastSuccess?.at)<attemptStarted)throw new Error('雲端工作仍在執行，尚未取得新的成功紀錄');
       remaining(deadline,now);
-      const {report,success,groups,proof,six}=verifyState(state,result,started,now());
+      const {report,success,groups,proof,six,publication}=verifyState(state,result,started,now());
       // Current publication and historical semantic replay use separate Worker
       // requests. A successful current state cannot hide deferred review work.
       const historical=verifyHistoricalReviews(await json('/api/reviews'),report,now());
       const {day,minutes}=taipeiTime(now());
-      const value={day,checkHour:Math.floor(minutes/60),ok:true,latestPeriod:report.cutoffPeriod,latestDate:report.input?.lastDate,targetPeriod:report.targetPeriod,targetDate:report.targetDate,inputHash:report.inputHash,decisionId:state.decision.decision.id,groupSnapshotId:groups.id,verificationId:proof.id,sixCombinationId:six.id,...historical};
+      const value={day,checkHour:Math.floor(minutes/60),ok:true,latestPeriod:report.cutoffPeriod,latestDate:report.input?.lastDate,targetPeriod:report.targetPeriod,targetDate:report.targetDate,inputHash:report.inputHash,decisionId:state.decision.decision.id,groupSnapshotId:groups.id,verificationId:proof.id,sixCombinationId:six.id,publicationId:publication.id,publicationVersion:publication.version,publicationMode:publication.mode,publicationFullAuditAt:publication.fullAuditAt,...historical};
       await saveHeartbeatBounded(value,saveHeartbeat,Math.min(heartbeatTimeoutMs,remaining(deadline,now)));
       log(JSON.stringify({...value,sourceCheckedAt:success.at,message:result.message}));return value;
     }catch(e){
