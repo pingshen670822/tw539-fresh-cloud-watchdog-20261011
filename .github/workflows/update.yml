@@ -1,9 +1,10 @@
 name: 539雲端更新與自主檢修
 on:
   schedule:
-    # The script exits immediately on ordinary Sundays. Daily scheduling also
-    # covers only the explicitly confirmed exceptional Sunday draw dates.
+    # Night checks plus disjoint hourly catch-up. Delayed runs must still read
+    # actual official state; the Site owns the calendar and never backdates.
     - cron: '2-57/5 12-15 * * *'
+    - cron: '17 0-11,16-23 * * *'
   workflow_dispatch:
 permissions:
   contents: write

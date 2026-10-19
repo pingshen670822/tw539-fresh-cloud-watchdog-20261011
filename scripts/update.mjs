@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
+import {verifyPublication} from './publication-contract.mjs';
 
 export const BASE='https://tw539-fresh-cloud-20261011.ping-shen670888.chatgpt.site';
 export const EXTRA_DRAW_DATES=['2025-01-26','2025-02-02','2025-02-09','2026-02-15','2026-02-22','2026-03-01'];
@@ -72,7 +73,9 @@ export function verifyState(state,result,started,checkedAt){
   assert.equal(success.inputHash,report.inputHash,'資料指紋不一致');
   if(result.inputHash)assert.equal(result.inputHash,report.inputHash,'更新回應資料指紋不一致');
   const cloudState=state?.status?.state,decision=state?.decision?.decision,sync=state?.sync;
-  assert.ok(!cloudState?.lastError&&!cloudState?.candidateError&&!cloudState?.decisionError,'雲端模組仍有未處理故障，不能標示更新成功');
+  assert.ok(['lastError','candidateError','decisionError','groupError','verificationError','sixCombinationError'].every(key=>!cloudState?.[key]),'雲端模組仍有未處理故障，不能標示更新成功');
+  assert.ok(!cloudState?.updateProgress,'雲端分階段運算仍在進行，不能標示更新成功');
+  assert.ok(['groupReviewError','fiftyReviewError','sixReviewError'].every(key=>!state?.[key]),'雲端實戰檢討仍有未處理故障，不能標示更新成功');
   assert.equal(report.archiveVerified,true,'原始封存尚未通過全歷史重算驗證');
   assert.equal(state?.decision?.ready,true,'本期獨支決策尚未完成讀回驗證');
   assert.ok(decision&&sync,'本期獨支決策或跨裝置同步資料缺漏');
@@ -90,6 +93,8 @@ export function verifyState(state,result,started,checkedAt){
   if(result.decision?.id)assert.equal(result.decision.id,decision.id,'更新回應獨支決策識別不一致');
   assert.notEqual(result.candidate?.ok,false,'本次更新候選模組未完成');
   assert.notEqual(result.decision?.ok,false,'本次更新獨支決策未完成');
+  for(const key of ['groups','verification','sixCombinations'])assert.notEqual(result[key]?.ok,false,'本次更新模組未完成：'+key);
+  assert.notEqual(result.pending,true,'本次更新尚在分階段運算，不能標示完成');
   const research=decision.research;
   assert.ok(research,'每日研究獨支缺漏，不能只以原始封存標示成功');
   assert.equal(research.status,'research_only','研究獨支狀態無效，不能自動升級高信心');
@@ -137,10 +142,11 @@ export function verifyState(state,result,started,checkedAt){
     assert.equal(decision.adoptionReview?.policy?.version,'539-verified-adoption-v1-20261011','模型採用審查政策缺漏或版本不符');
     assert.ok(Array.isArray(decision.adoptionReview.records),'模型採用審查紀錄格式無效');
   }
+  const publication=verifyPublication(state,result,checkedAt);
   const publicationDeadline=Date.parse(report.targetDate+'T22:00:00+08:00');
   assert.ok(Number.isFinite(publicationDeadline),'目標日期無效');
   if(checkedAt>publicationDeadline)throw new Error('台北22:00完整結果預計公布後仍未取得新期，立即啟動檢修');
-  return {report,success};
+  return {report,success,...publication};
 }
 
 export async function heartbeat(value,{signal}={}){
@@ -148,7 +154,7 @@ export async function heartbeat(value,{signal}={}){
   signal?.throwIfAborted();
   let previous;try{previous=JSON.parse(await readFile(path,{encoding:'utf8',signal}));}catch{}
   signal?.throwIfAborted();
-  const key=JSON.stringify([value.day,value.ok,value.latestPeriod,value.targetPeriod,value.inputHash,value.error]);
+  const key=JSON.stringify([value.day,value.checkHour,value.ok,value.latestPeriod,value.targetPeriod,value.inputHash,value.decisionId,value.groupSnapshotId,value.verificationId,value.sixCombinationId,value.error]);
   if(previous?.key===key)return;
   await writeFile(path,JSON.stringify({...value,key,checkedAt:new Date().toISOString()},null,2)+'\n',{signal});
 }
@@ -164,9 +170,10 @@ export async function saveHeartbeatBounded(value,save=heartbeat,timeoutMs=10000)
 
 export async function runWatchdog({event=process.env.TW539_EVENT,now=Date.now,fetchImpl=fetch,sleep=pause,saveHeartbeat=heartbeat,log=console.log,logError=console.error,budgetMs=TOTAL_BUDGET_MS,heartbeatTimeoutMs=10000}={}){
   const started=now(),deadline=started+budgetMs;
-  if(event==='schedule'&&!scheduledWindow(started)){
-    log('不在已確認開獎日的更新時段，略過');return {ok:true,skipped:true};
-  }
+  // GitHub may start a queued night schedule hours late. Always ask the Site
+  // for the actual latest official data, including Sunday/next-day catch-up;
+  // only the Site calendar chooses the next draw. Never backdate a forecast.
+  if(event==='schedule'&&!scheduledWindow(started))log('延遲或非夜間排程：實際核對官方最新期別並補行檢修');
   const json=(path,options={})=>requestJson(path,{...options,deadline,now,fetchImpl});
   let error='';
   for(let attempt=0;attempt<3;attempt++){
@@ -187,9 +194,9 @@ export async function runWatchdog({event=process.env.TW539_EVENT,now=Date.now,fe
       }
       if(result.busy&&Date.parse(state?.status?.state?.lastSuccess?.at)<attemptStarted)throw new Error('雲端工作仍在執行，尚未取得新的成功紀錄');
       remaining(deadline,now);
-      const {report,success}=verifyState(state,result,started,now());
-      const {day}=taipeiTime(now());
-      const value={day,ok:true,latestPeriod:report.cutoffPeriod,latestDate:report.input?.lastDate,targetPeriod:report.targetPeriod,targetDate:report.targetDate,inputHash:report.inputHash};
+      const {report,success,groups,proof,six}=verifyState(state,result,started,now());
+      const {day,minutes}=taipeiTime(now());
+      const value={day,checkHour:Math.floor(minutes/60),ok:true,latestPeriod:report.cutoffPeriod,latestDate:report.input?.lastDate,targetPeriod:report.targetPeriod,targetDate:report.targetDate,inputHash:report.inputHash,decisionId:state.decision.decision.id,groupSnapshotId:groups.id,verificationId:proof.id,sixCombinationId:six.id};
       await saveHeartbeatBounded(value,saveHeartbeat,Math.min(heartbeatTimeoutMs,remaining(deadline,now)));
       log(JSON.stringify({...value,sourceCheckedAt:success.at,message:result.message}));return value;
     }catch(e){
@@ -202,7 +209,7 @@ export async function runWatchdog({event=process.env.TW539_EVENT,now=Date.now,fe
       }
     }
   }
-  const value={day:taipeiTime(now()).day,ok:false,error};
+  const checked=taipeiTime(now()),value={day:checked.day,checkHour:Math.floor(checked.minutes/60),ok:false,error};
   try{await saveHeartbeatBounded(value,saveHeartbeat,heartbeatTimeoutMs);}catch(e){value.error+='；'+messageOf(e);logError(messageOf(e));}
   return value;
 }

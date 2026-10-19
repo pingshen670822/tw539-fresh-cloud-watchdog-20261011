@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {requestJson,runWatchdog,scheduledWindow,verifyState,saveHeartbeatBounded,TOTAL_BUDGET_MS} from '../scripts/update.mjs';
+import {attachPublication,seal} from './publication-fixture.mjs';
+import {digest} from '../scripts/publication-contract.mjs';
 
 const instant=Date.parse('2026-10-10T21:40:00+08:00');
 const token='12345678-1234-1234-1234-123456789abc';
@@ -12,7 +14,7 @@ function state(at=instant,targetDate='2026-10-10'){
   const research={version:'fixture-research',status:'research_only',number:1,modelId:'discount60',modelEstimate:5/39,targetDate,targetPeriod:report.targetPeriod,cutoffPeriod:report.cutoffPeriod,trainingDraws:5990,ranking,top5:[1,2,3,4,5],top9:[1,2,3,4,5,6,7,8,9],checks:{prequential:true,ranking:true,marginalSum:true,explanation:true},modelSelection:{selectedModelId:'discount60',experts:[{id:'discount60',currentSingle:1,currentEstimate:5/39}]}};
   const decision={id:'d'.repeat(64),version:'fixture-decision',status:'no_supported_single',selectedNumber:null,targetDate,targetPeriod:report.targetPeriod,cutoffPeriod:report.cutoffPeriod,inputHash:hash,research};
   const sync={snapshotId:'e'.repeat(64),inputHash:hash,targetPeriod:report.targetPeriod,cutoffPeriod:report.cutoffPeriod,modelVersion:report.modelVersion,storedAt:report.storedAt,decisionId:decision.id,decisionVersion:decision.version,decisionStatus:decision.status,researchVersion:research.version,researchNumber:research.number};
-  return {report,decision:{ready:true,decision},sync,status:{state:{lastError:null,candidateError:null,decisionError:null,lastSuccess:{at:new Date(at).toISOString(),latestPeriod:report.cutoffPeriod,targetPeriod:report.targetPeriod,inputHash:hash}}}};
+  return attachPublication({report,decision:{ready:true,decision},sync,status:{state:{lastError:null,candidateError:null,decisionError:null,groupError:null,verificationError:null,sixCombinationError:null,lastSuccess:{at:new Date(at).toISOString(),latestPeriod:report.cutoffPeriod,targetPeriod:report.targetPeriod,inputHash:hash}}}});
 }
 function stateV3(at=instant,targetDate='2026-10-10'){
   const result=state(at,targetDate),decision=result.decision.decision,research=decision.research;
@@ -21,13 +23,13 @@ function stateV3(at=instant,targetDate='2026-10-10'){
   decision.adoptionReview={policy:{version:'539-verified-adoption-v1-20261011'},records:[]};
   decision.candidates=Array.from({length:39},(_,i)=>({number:i+1,eligible:false,genericSupportPassed:false,isRepeat:false,repeatStatus:'not_applicable',supportingModels:[]}));
   result.sync.decisionVersion=decision.version;
-  return result;
+  return attachPublication(result);
 }
 function supportedV3(){
   const result=stateV3(),decision=result.decision.decision,selected=decision.candidates.find(row=>row.number===17);
   decision.status='supported';decision.selectedNumber=17;selected.eligible=true;selected.genericSupportPassed=true;selected.supportingModels=[{id:'approved-model',currentSingle:17,validated:true,approvedForSelection:true}];
   result.sync.decisionStatus=decision.status;
-  return result;
+  return attachPublication(result);
 }
 const response=(data,status=200,retryAfter)=>({ok:status>=200&&status<300,status,headers:{get:name=>name==='retry-after'?retryAfter:null},json:async()=>data});
 function harness({at=instant,event='workflow_dispatch',refresh={ok:true},getState,customFetch,budgetMs}={}){
@@ -53,9 +55,21 @@ test('schedule bounds use Taipei time and include only confirmed exceptional Sun
   assert.equal(scheduledWindow(Date.parse('2027-02-07T21:40:00+08:00')),false);
 });
 
-test('ordinary Sunday schedule performs no requests or heartbeat writes',async()=>{
-  const h=harness({at:Date.parse('2026-10-11T21:40:00+08:00'),event:'schedule'});
-  assert.equal((await runWatchdog(h.options)).skipped,true);assert.deepEqual(h.calls,[]);assert.deepEqual(h.saved,[]);
+test('Sunday schedule actually checks official state and the next real draw instead of a successful no-op',async()=>{
+  const at=Date.parse('2026-10-11T21:40:00+08:00'),h=harness({at,event:'schedule',getState:()=>state(at,'2026-10-12')});
+  const result=await runWatchdog(h.options);
+  assert.equal(result.ok,true);assert.equal(result.skipped,undefined);assert.equal(result.targetDate,'2026-10-12');assert.equal(h.calls.length,3);assert.equal(h.saved.length,1);
+});
+
+test('a night schedule delayed until next-day00:31 still updates and reads persisted current state',async()=>{
+  const at=Date.parse('2026-10-17T00:31:00+08:00'),h=harness({at,event:'schedule',getState:()=>state(at,'2026-10-17')});
+  const result=await runWatchdog(h.options);
+  assert.equal(result.ok,true);assert.equal(result.skipped,undefined);assert.equal(result.day,'2026-10-17');assert.equal(h.calls.length,3);assert.equal(h.saved[0].verificationId.length,64);assert.equal(h.saved[0].sixCombinationId.length,64);
+});
+
+test('a delayed Sunday run with stale target reports failed health after actual requests',async()=>{
+  const at=Date.parse('2026-10-11T21:40:00+08:00'),h=harness({at,event:'schedule',getState:()=>state(at,'2026-10-10')});
+  assert.equal((await runWatchdog(h.options)).ok,false);assert.equal(h.calls.filter(path=>path==='/api/state').length,3);assert.equal(h.saved[0].ok,false);
 });
 
 test('manual Sunday invocation remains available',async()=>{
@@ -83,6 +97,7 @@ test('verified research remains healthy without a high-confidence selectedNumber
 
 test('version2 research fixtures remain compatible without version3 diagnostic fields',()=>{
   const valid=state();valid.decision.decision.version='539-single-guarded-with-research-v2-20261011';valid.sync.decisionVersion=valid.decision.decision.version;
+  attachPublication(valid);
   assert.equal(valid.decision.decision.researchDiagnostics,undefined);
   assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
 });
@@ -149,6 +164,7 @@ test('supported labels cannot bypass candidate eligibility, validation or explic
 
 test('a repeat primary must pass its own repeat gate; unsupported states must retain a null primary',()=>{
   const valid=supportedV3(),selected=valid.decision.decision.candidates.find(row=>row.number===17);selected.isRepeat=true;selected.repeatStatus='supported';
+  attachPublication(valid);
   assert.doesNotThrow(()=>verifyState(valid,{ok:true},instant,instant));
   selected.repeatStatus='insufficient';assert.throws(()=>verifyState(valid,{ok:true},instant,instant),/連莊主推薦/);
   for(const status of ['no_supported_single','stale']){
@@ -163,11 +179,11 @@ test('version3 missing diagnostics is retried and reported failed rather than fa
 });
 
 test('module failures cannot be hidden by an otherwise fresh lastSuccess',()=>{
-  for(const key of ['lastError','candidateError','decisionError']){
+  for(const key of ['lastError','candidateError','decisionError','groupError','verificationError','sixCombinationError']){
     const bad=state();bad.status.state[key]={at:new Date(instant).toISOString(),message:'failed'};
     assert.throws(()=>verifyState(bad,{ok:true},instant,instant),/未處理故障/);
   }
-  for(const key of ['candidate','decision'])assert.throws(()=>verifyState(state(),{ok:true,[key]:{ok:false}},instant,instant),/未完成/);
+  for(const key of ['candidate','decision','groups','verification','sixCombinations'])assert.throws(()=>verifyState(state(),{ok:true,[key]:{ok:false}},instant,instant),/未完成/);
 });
 
 test('missing or unverified forecast, decision and research reject healthy status',()=>{
@@ -304,9 +320,87 @@ test('repair attempts stop at three and never record success on API failure',asy
   assert.equal((await runWatchdog(h.options)).ok,false);assert.equal(h.calls.length,6);assert.equal(h.saved.length,1);assert.equal(h.saved[0].ok,false);
 });
 
-test('daily cron delegates Sunday gating to the script and reserves runner time',async()=>{
+// Re-sign altered fixtures to prove the structural checks, not just a digest
+// mismatch, reject corrupt or late publication contracts. Never production data.
+function rebindPublication(s){
+ const d=s.decision.decision=seal(s.decision.decision),g=s.groups.snapshot;
+ g.sourceDecisionId=d.id;s.groups.snapshot=seal(g);
+ const p=s.verification.report;p.decisionId=d.id;p.groupSnapshotId=s.groups.snapshot.id;
+ s.verification.report=seal(p);
+ const six=s.sixCombinations.snapshot;six.sourceVerificationId=s.verification.report.id;six.sourceVerificationStoredAt=p.storedAt;
+ s.sixCombinations.snapshot=seal(six);
+ Object.assign(s.sync,{decisionId:d.id,groupSnapshotId:s.groups.snapshot.id,groupSourceDecisionId:d.id,verificationId:s.verification.report.id,sixCombinationId:s.sixCombinations.snapshot.id,sixSourceVerificationId:s.verification.report.id,snapshotId:digest([s.report.modelVersion,s.report.targetPeriod,s.report.inputHash,s.report.storedAt,d.id,s.groups.snapshot.id,s.verification.report.id,s.sixCombinations.snapshot.id])});
+ return s;
+}
+
+test('all original groups, twenty-check proof and fifty-module fusion must exist before healthy publication',()=>{
+ for(const mutate of [s=>delete s.groups,s=>s.groups.ready=false,s=>s.groups.archiveVerified=false,s=>delete s.verification,s=>s.verification.ready=false,s=>delete s.verification.report.fifty,s=>s.verification.report.fifty.modules.pop(),s=>s.verification.report.fifty.moduleCount=49,s=>s.verification.report.fifty.fusion=null,s=>delete s.sixCombinations,s=>s.sixCombinations.ready=false]){
+  const s=stateV3();mutate(s);assert.throws(()=>verifyState(s,{ok:true},instant,instant));
+ }
+});
+
+test('immutable decision, group, proof and SIX payload IDs are recomputed on every readback',()=>{
+ for(const select of [s=>s.decision.decision,s=>s.groups.snapshot,s=>s.verification.report,s=>s.sixCombinations.snapshot]){
+  const s=stateV3(),saved=select(s);saved.unsealedChange=true;
+  assert.throws(()=>verifyState(s,{ok:true},instant,instant),/封存內容識別不一致/);
+ }
+});
+
+test('re-digested incomplete twenty-check proofs and altered fifty configurations cannot pass',()=>{
+ for(const mutate of [p=>p.requiredCount=10,p=>p.passedCount=19,p=>p.checks.pop(),p=>p.checks[0].passed=false,p=>p.checks[1].id=p.checks[0].id,p=>p.passes.fifty=1,p=>p.coverage.fiftyModules=49,p=>p.fifty.modules.pop(),p=>p.fifty.modules[24].parameters.prior=999,p=>p.fifty.modules[24].stats.singleHits++,p=>p.fifty.fusion.weights[0].weight+=0.001,p=>p.fifty.fusion.ranking[0].probability+=0.001,p=>p.fifty.fusion.groups[0].minHits=1,p=>p.fifty.numericChecks.valuesVerified--]){
+  const s=stateV3();mutate(s.verification.report);rebindPublication(s);
+  assert.throws(()=>verifyState(s,{ok:true},instant,instant));
+ }
+});
+
+test('re-digested late or source-predating proof and SIX seals remain invalid',()=>{
+ for(const mutate of [s=>s.verification.report.storedAt=s.report.targetDate+'T12:30:00.000Z',s=>s.verification.report.generatedAt=s.report.targetDate+'T12:30:00.000Z',s=>s.verification.report.generatedAt=new Date(Date.parse(s.groups.snapshot.storedAt)-1).toISOString(),s=>{s.sixCombinations.snapshot.generatedAt=s.report.targetDate+'T12:30:00.000Z';s.sixCombinations.snapshot.storedAt=s.sixCombinations.snapshot.generatedAt},s=>{s.sixCombinations.snapshot.generatedAt=new Date(Date.parse(s.verification.report.storedAt)-1).toISOString();s.sixCombinations.snapshot.storedAt=s.sixCombinations.snapshot.generatedAt}]){
+  const s=stateV3();mutate(s);rebindPublication(s);assert.throws(()=>verifyState(s,{ok:true},instant,instant));
+ }
+});
+
+test('re-digested SIX must retain exact five-thousand-five top ten, full-history labels and source binding',()=>{
+ for(const mutate of [s=>s.sixCombinations.snapshot.groups.pop(),s=>s.sixCombinations.snapshot.pool.reverse(),s=>s.sixCombinations.snapshot.groups[0].numbers[5]=39,s=>s.sixCombinations.snapshot.groups[0].expectedHits+=0.01,s=>s.sixCombinations.snapshot.groups[0].history.all.totalHits++,s=>s.sixCombinations.snapshot.evaluation.publishedPerformance=true,s=>s.sixCombinations.snapshot.policy.candidateCount=10,s=>s.sixCombinations.snapshot.sourceFiftyVersion='old',s=>s.sixCombinations.snapshot.targetPeriod++]){
+  const s=stateV3();mutate(s);rebindPublication(s);assert.throws(()=>verifyState(s,{ok:true},instant,instant));
+ }
+});
+
+test('new proof, groups and SIX readback IDs must match sync and the refresh receipt',()=>{
+ for(const key of ['groupSnapshotId','groupVersion','groupSourceDecisionId','verificationId','verificationVersion','sixCombinationId','sixCombinationVersion','sixSourceVerificationId']){
+  const s=stateV3();s.sync[key]='f'.repeat(64);assert.throws(()=>verifyState(s,{ok:true},instant,instant),/同步識別/);
+ }
+ for(const key of ['groups','verification','sixCombinations'])assert.throws(()=>verifyState(stateV3(),{ok:true,[key]:{ok:true,id:'f'.repeat(64)}},instant,instant),/更新回應/);
+ const s=stateV3();s.sync.snapshotId='f'.repeat(64);assert.throws(()=>verifyState(s,{ok:true},instant,instant),/完整跨裝置快照/);
+});
+
+test('throttled skipped responses never hide a SIX, fifty, group or live-review failure',async()=>{
+ for(const mutate of [s=>{s.sixCombinations.ready=false;s.status.state.sixCombinationError={message:'SIX failed'}},s=>{s.verification.ready=false;s.status.state.verificationError={message:'fifty failed'}},s=>s.status.state.groupError={message:'groups failed'},s=>s.status.state.updateProgress={stage:'proof',inputHash:s.report.inputHash},s=>s.groupReviewError='failed',s=>s.fiftyReviewError='failed',s=>s.sixReviewError='failed']){
+  const h=harness({refresh:{ok:true,skipped:true},getState:at=>{const s=stateV3(at);mutate(s);return s}}),result=await runWatchdog(h.options);
+  assert.equal(result.ok,false);assert.equal(h.saved.length,1);assert.equal(h.saved[0].ok,false);assert.equal(h.calls.filter(path=>path.startsWith('/api/refresh')).length,3);
+ }
+});
+
+test('phase-one pending checkpoint is retried with a new capability and only phase-two readback is healthy',async()=>{
+ let refreshes=0;
+ const h=harness({customFetch:path=>{if(path.startsWith('/api/refresh')&&++refreshes===1)return response({ok:false,pending:true,sourceOk:true,message:'核心已保存，等候五十模組驗證'},202)}});
+ const result=await runWatchdog(h.options);
+ assert.equal(result.ok,true);assert.equal(refreshes,2);assert.ok(h.calls.includes('/api/refresh?mode=repair'));assert.equal(h.calls.filter(path=>path==='/api/action').length,2);assert.equal(h.saved.length,1);assert.equal(h.saved[0].ok,true);
+ assert.throws(()=>verifyState(stateV3(),{ok:true,pending:true},instant,instant),/分階段運算/);
+ const inProgress=stateV3();inProgress.status.state.updateProgress={stage:'report_verification'};assert.throws(()=>verifyState(inProgress,{ok:true},instant,instant),/分階段運算/);
+ const pending=harness({refresh:{ok:false,pending:true,sourceOk:true,message:'pending'}});assert.equal((await runWatchdog(pending.options)).ok,false);assert.equal(pending.saved[0].ok,false);assert.equal(pending.calls.includes('/api/state'),false);
+});
+
+test('the structural watchdog has no model-replay or Site-checkout dependency',async()=>{
+ const sources=await Promise.all(['update.mjs','publication-contract.mjs','fifty-policy.mjs','report-verification-policy.mjs'].map(file=>readFile(new URL('../scripts/'+file,import.meta.url),'utf8')));
+ for(const source of sources)assert.ok(!/from\s+['"](?:\.\.\/.*lib\/|.*(?:fifty-modules|report-verification|cloud)\.(?:ts|mjs)['"])/.test(source));
+});
+
+test('night five-minute and off-night hourly catch-up crons never overlap and reserve runner time',async()=>{
   const workflow=await readFile(new URL('../.github/workflows/update.yml',import.meta.url),'utf8');
   assert.match(workflow,/cron: '2-57\/5 12-15 \* \* \*'/);assert.match(workflow,/timeout-minutes: 8/);
+  assert.match(workflow,/cron: '17 0-11,16-23 \* \* \*'/);
+  const nightHours=[12,13,14,15],catchupHours=Array.from({length:24},(_,i)=>i).filter(i=>i<=11||i>=16);
+  assert.equal(nightHours.some(hour=>catchupHours.includes(hour)),false);assert.equal(new Set([...nightHours,...catchupHours]).size,24);
   assert.match(workflow,/node --test tests\/update.test.mjs/);
   assert.equal(TOTAL_BUDGET_MS,360000);assert.ok(TOTAL_BUDGET_MS<8*60*1000);
 });
