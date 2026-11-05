@@ -1,8 +1,8 @@
 {
   "day": "2026-11-06",
-  "checkHour": 2,
+  "checkHour": 3,
   "ok": false,
   "error": "有新開獎資料或發布來源過期，需接續完整運算",
-  "key": "[\"2026-11-06\",2,false,null,null,null,null,null,null,null,null,null,\"有新開獎資料或發布來源過期，需接續完整運算\"]",
-  "checkedAt": "2026-11-05T18:46:06.036Z"
+  "key": "[\"2026-11-06\",3,false,null,null,null,null,null,null,null,null,null,\"有新開獎資料或發布來源過期，需接續完整運算\"]",
+  "checkedAt": "2026-11-05T19:18:15.717Z"
 }
