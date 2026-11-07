@@ -1,6 +1,6 @@
 {
   "day": "2026-11-08",
-  "checkHour": 1,
+  "checkHour": 4,
   "ok": true,
   "latestPeriod": 115000270,
   "latestDate": "2026-11-07",
@@ -15,10 +15,10 @@
   "publicationVersion": "539-signed-publication-v1-20261019",
   "publicationMode": "signed_verified_archive",
   "publicationFullAuditAt": "2026-11-07T15:40:08.852Z",
-  "historyReceiptId": "46b618ee80002bc7c043c3c649080f509006455c675d491ff2a7e9b0ebeb1975",
+  "historyReceiptId": "604dbacd242cf3cde71408c2ddd062aadc1559afd69183aaa0a5b311b01ebe91",
   "historicalReviewsVerified": true,
   "fiftyReviewCount": 20,
   "sixReviewCount": 20,
-  "key": "[\"2026-11-08\",1,true,115000270,115000271,\"721c9cd5ceb4142d0ae65297234a558e576422a9683784046395a374709e10a0\",\"bb3eec0fea3696aece24b24d946a1b68cad738b38ed2e035263aec8f26247c13\",\"c672541e2c5a0b3349fd3294bd87541b98be1c8f03ec665093f31c48bb11a97a\",\"271173f16cf036998e87d23ce6c38e55dee662b51b7c82f4b3f78f730f96980f\",\"67d1bc2bbb460f16bb7a7716b96fe0029aa45b85f84d8b4f8bb9d4faea934723\",\"3fbc51f0e81419851b79673c3e51fad54cad6e5df39ff36dfd9af996efe16762\",\"46b618ee80002bc7c043c3c649080f509006455c675d491ff2a7e9b0ebeb1975\",null]",
-  "checkedAt": "2026-11-07T17:14:01.174Z"
+  "key": "[\"2026-11-08\",4,true,115000270,115000271,\"721c9cd5ceb4142d0ae65297234a558e576422a9683784046395a374709e10a0\",\"bb3eec0fea3696aece24b24d946a1b68cad738b38ed2e035263aec8f26247c13\",\"c672541e2c5a0b3349fd3294bd87541b98be1c8f03ec665093f31c48bb11a97a\",\"271173f16cf036998e87d23ce6c38e55dee662b51b7c82f4b3f78f730f96980f\",\"67d1bc2bbb460f16bb7a7716b96fe0029aa45b85f84d8b4f8bb9d4faea934723\",\"3fbc51f0e81419851b79673c3e51fad54cad6e5df39ff36dfd9af996efe16762\",\"604dbacd242cf3cde71408c2ddd062aadc1559afd69183aaa0a5b311b01ebe91\",null]",
+  "checkedAt": "2026-11-07T20:13:49.421Z"
 }
